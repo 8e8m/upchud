@@ -13,36 +13,42 @@ set outdir "out/"
 # Options are:
 #   simple - just restrict into $::label_char_set
 #   mangle - random name (never clobbers: retries up to $::max_save_attempts)
-#   hash   - sha1 prefix, deduplicates identical content (needs sha1sum and cmp)
+#   hash   - sha1 prefix, deduplicates identical content (needs sha1sum and cmp),
+#            extends name when collision occurs instead of clobbering
 set labeling_scheme "hash"
-# The length of the generated base name. Applies to mangled and hashed names.
 
-set auto_label_length 4 ;
-# from memory, 6 is good for mangle, and should be a decently large enough space.
-# 4 is fine for hash, though 6 is betta.
+# The length of the generated base name. Applies to mangled and hashed names.
+set auto_label_length 4
+# from memory, higher is better for mangle.
+# a small number is fine for hash due to its auto-extending strategy.
 
 # The characters which are allowed to be used in upload names.
-#  '.' is always implicitly allowed. Do NOT specify '.' or '/'.
-set label_char_set {0123456789abcdefghijklmnopqrstuvwxyz}
+#  '.' is always implicitly allowed. Do NOT specify '.' or '/', saar.
+set label_char_set {0123456789abcdefghijklmnopqrstuvwxyz-_}
 #set label_char_set {0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZáÁéóÓöÖőŐúÚüÜűŰ -_}
 
 # Every random name has a chance to collide with a previously saved file.
 # Theoretically if you don't clean your uploads and both your
 # $::auto_label_length and $::label_char_set are small, you could end up with a dead lock.
 # This value is the fail-safe.
-set max_save_attempts 3
+
+# higher values don't yield any value except in choked mangling.
+set max_save_attempts 10
 
 # Only used by the "simple" scheme: when off, uploading an existing name is an
 # error; when on, it clobbers. "mangle" and "hash" never clobber.
-set overwrite_uploads 1
+#  THIS is a claude-ism in being useless,
+# this really should just enable clobbering within our auto_label_length (which is a terrible name)
+set overwrite_uploads 0
 
 # Reject requests larger than this many bytes (0 = no limit). POST bodies are
 # held in memory (about 2x), so keep this sane, and also set
-# client_max_body_size in nginx.
-set max_upload_bytes 268435456
+# client_max_body_size in nginx. (which in up.chud.cyou is set as 100MiB.)
+set max_upload_bytes [expr 1024 * 1024 * 256]
+
+
 # The output of this function is (ideally) what the user will see.
 # I have provided a few default behaviours, but you do you champ.
-
 proc send_success {upload_name} {
     proc simple {upload_name} {
         set scheme $::env(REQUEST_SCHEME)
@@ -234,8 +240,8 @@ proc main {} {
     set method $::env(REQUEST_METHOD)
 
     set content_length 0
-    if { [info exists ::env(CONTENT_LENGTH)] && [string is integer -strict $::env(CONTENT_LENGTH)] } {
-        set content_length $::env(CONTENT_LENGTH)
+    if { [info exists ::env(CONTENT_LENGTH)] && [regexp {^[0-9]{1,12}$} $::env(CONTENT_LENGTH)] } {
+    set content_length [lindex [scan $::env(CONTENT_LENGTH) %ld] 0]
     }
     if { $::max_upload_bytes > 0 && $content_length > $::max_upload_bytes } {
         respond_error "413 Payload Too Large"
@@ -251,13 +257,10 @@ proc main {} {
         set original_name [file tail $uri]
 
         set f [open_temp]
-        if { $content_length > 0 } {
-            chan copy stdin $f -size $content_length
-        } else {
-            chan copy stdin $f
-        }
-        close $f
-
+	if { $content_length > 0 } {
+	    if { [chan copy stdin $f -size $content_length] != $content_length } { close $f; raise_fatal }
+	}
+	close $f
     } else {
         # NOTE:
         #  we must parse multipart/form-data;
